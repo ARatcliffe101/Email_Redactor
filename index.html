@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Email Redactor</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucL8qQY4j06atd5HMTp8Ff6VdXMtH7lCV9j2aJ2uQm8ZK1z+E5R01Q7QJVLnN1BQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" integrity="sha512-/1s2e4bk0P9zYw8bYsC6RL4i2H8qZ+OYcQp6y3KNH/KRdWh4zGZJ5ZxgYB3vpcubV0sE20zEgmO7VDCG1rA9Lg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>Email Redactor</h1>
+      <p>Upload documents, choose which email addresses to redact, then export clean PDFs.</p>
+    </div>
+    <span class="privacy-badge">Runs locally in your browser</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>1. Upload files</h2>
+      <p class="muted">Supported in this GitHub Pages version: .eml, .txt, .html, .htm. PDF upload is treated as plain extracted text only if the browser can read it as text; for reliable PDF extraction use the desktop version.</p>
+      <input id="fileInput" type="file" multiple accept=".eml,.txt,.html,.htm,.csv,.md" />
+      <div id="fileSummary" class="summary"></div>
+    </section>
+
+    <section class="card">
+      <h2>2. Redaction settings</h2>
+      <div class="grid two">
+        <label>
+          Replacement text
+          <input id="replacementText" type="text" value="[email redacted]" />
+        </label>
+        <label>
+          Export mode
+          <select id="exportMode">
+            <option value="zip">Individual PDFs in ZIP</option>
+            <option value="combined">One combined PDF</option>
+            <option value="txtzip">Individual redacted TXT files in ZIP</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="checkboxes">
+        <label><input id="preserveLayout" type="checkbox" checked /> Preserve spacing and line layout where possible</label>
+        <label><input id="safetyNet" type="checkbox" checked /> Safety net: redact any email-shaped address during export</label>
+        <label><input id="includeMetadata" type="checkbox" checked /> Include email metadata in output</label>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
+        <h2>3. Choose emails to redact</h2>
+        <div class="button-row">
+          <button id="selectAllBtn" type="button">Select all</button>
+          <button id="selectNoneBtn" type="button">Select none</button>
+          <button id="selectRecipientsBtn" type="button">Select To, Cc and Bcc</button>
+          <button id="selectBodyBtn" type="button">Select body emails</button>
+        </div>
+      </div>
+      <div id="emailTableWrap" class="table-wrap muted">Upload files to see detected email addresses.</div>
+    </section>
+
+    <section class="card">
+      <h2>4. Export</h2>
+      <div class="button-row">
+        <button id="exportBtn" type="button" class="primary">Generate export</button>
+        <button id="clearBtn" type="button">Clear</button>
+      </div>
+      <div id="status" class="status"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>This static version performs processing in the browser. Do not close the tab until your export has downloaded.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
