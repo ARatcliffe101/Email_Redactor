@@ -1,4 +1,4 @@
-const EMAIL_REGEX = /(?<![A-Z0-9._%+-])(?:mailto:)?([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?![A-Z0-9._%+-])/gi;
+const EMAIL_REGEX = /(?:mailto:)?([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi;
 const OBFUSCATED_EMAIL_REGEX = /\b([A-Z0-9._%+-]+)\s*(?:\[at\]|\(at\)|\sat\s)\s*([A-Z0-9.-]+)\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*([A-Z]{2,})\b/gi;
 
 const state = {
@@ -206,6 +206,16 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
 }
 
+function makePdfSafeText(value) {
+  return String(value)
+    .replace(/[\u2580-\u259F]/g, 'x')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u2026/g, '...')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '');
+}
+
 function setSelection(predicate) {
   for (const entry of state.emailMap.values()) entry.selected = predicate(entry);
   renderEmailTable();
@@ -215,7 +225,7 @@ function makeReplacement(original, replacement, preserveLayout) {
   if (!preserveLayout) return replacement;
   if (replacement.length === original.length) return replacement;
   if (replacement.length < original.length) return replacement + ' '.repeat(original.length - replacement.length);
-  return '█'.repeat(Math.max(3, original.length));
+  return 'x'.repeat(Math.max(3, original.length));
 }
 
 function redactText(text, selectedEmails, replacement, preserveLayout, safetyNet) {
@@ -275,7 +285,7 @@ async function createPdfBytes(title, text) {
   let page = pdfDoc.addPage(pageSize);
   let y = pageSize[1] - margin;
 
-  page.drawText(title.slice(0, 90), { x: margin, y, size: 11, font: bold, color: rgb(0, 0.25, 0.53) });
+  page.drawText(makePdfSafeText(title).slice(0, 90), { x: margin, y, size: 11, font: bold, color: rgb(0, 0.25, 0.53) });
   y -= 22;
 
   function newPage() {
@@ -290,7 +300,7 @@ async function createPdfBytes(title, text) {
     if (!chunks.length) chunks.push(' ');
     for (const chunk of chunks) {
       if (y < margin) newPage();
-      page.drawText(chunk, { x: margin, y, size: fontSize, font });
+      page.drawText(makePdfSafeText(chunk), { x: margin, y, size: fontSize, font });
       y -= lineHeight;
     }
   }
