@@ -5,8 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Email Redactor</title>
   <link rel="stylesheet" href="styles.css" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucL8qQY4j06atd5HMTp8Ff6VdXMtH7lCV9j2aJ2uQm8ZK1z+E5R01Q7QJVLnN1BQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" integrity="sha512-/1s2e4bk0P9zYw8bYsC6RL4i2H8qZ+OYcQp6y3KNH/KRdWh4zGZJ5ZxgYB3vpcubV0sE20zEgmO7VDCG1rA9Lg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
 <body>
   <header class="app-header">
@@ -76,6 +74,58 @@
     <p>This static version performs processing in the browser. Do not close the tab until your export has downloaded.</p>
   </footer>
 
-  <script src="app.js"></script>
+  <script>
+    async function loadScriptWithFallback(name, urls) {
+      for (const url of urls) {
+        try {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = url;
+            script.async = false;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.head.appendChild(script);
+          });
+          return;
+        } catch (err) {
+          console.warn(`Could not load ${name} from ${url}`);
+        }
+      }
+      throw new Error(`${name} could not be loaded. Check your internet connection or corporate firewall settings.`);
+    }
+
+    async function startApp() {
+      const status = document.getElementById('status');
+      try {
+        await loadScriptWithFallback('JSZip', [
+          'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js',
+          'https://unpkg.com/jszip@3.10.1/dist/jszip.min.js',
+          'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'
+        ]);
+        await loadScriptWithFallback('PDFLib', [
+          'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js',
+          'https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js',
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js'
+        ]);
+
+        if (!window.JSZip || !window.PDFLib) {
+          throw new Error('Libraries loaded but did not expose JSZip/PDFLib globals.');
+        }
+
+        const appScript = document.createElement('script');
+        appScript.src = 'app.js';
+        document.body.appendChild(appScript);
+      } catch (err) {
+        if (status) {
+          status.textContent = err.message;
+          status.className = 'status error';
+        } else {
+          alert(err.message);
+        }
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', startApp);
+  </script>
 </body>
 </html>
