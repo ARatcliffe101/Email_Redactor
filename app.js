@@ -909,6 +909,41 @@ function redactText(text, selectedEmails, replacement, preserveLayout, safetyNet
   return output;
 }
 
+
+function isRedactedRecipientListLine(line, replacement) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed) return true;
+
+  const escapedReplacement = escapeRegExp(String(replacement || '[email redacted]').trim());
+  const replacementOnly = new RegExp(`^['\"]?\\s*${escapedReplacement}\\s*['\"]?[;,]?$`, 'i');
+  const replacementInAddress = new RegExp(`^[^<>]{0,120}<\\s*${escapedReplacement}\\s*>[;,]?$`, 'i');
+
+  return replacementOnly.test(trimmed)
+    || replacementInAddress.test(trimmed)
+    || /^['\"]?x{6,}['\"]?[;,]?$/i.test(trimmed)
+    || /^[^<>]{0,120}<\s*x{6,}\s*>[;,]?$/i.test(trimmed);
+}
+
+function stripLeadingRecipientListBlock(text, replacement) {
+  const lines = String(text || '').split(/\r?\n/);
+  let index = 0;
+  while (index < lines.length && !lines[index].trim()) index += 1;
+
+  let scan = index;
+  let recipientLikeCount = 0;
+  while (scan < lines.length && isRedactedRecipientListLine(lines[scan], replacement)) {
+    if (lines[scan].trim()) recipientLikeCount += 1;
+    scan += 1;
+  }
+
+  // Only remove a block when it clearly looks like exported recipient metadata,
+  // not when a normal message happens to start with one redacted address.
+  if (recipientLikeCount < 3) return text;
+
+  while (scan < lines.length && !lines[scan].trim()) scan += 1;
+  return lines.slice(scan).join('\n').replace(/^\n+/, '');
+}
+
 function buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata) {
   const parts = [];
   if (includeMetadata) {
@@ -925,7 +960,8 @@ function buildOutputText(doc, selectedEmails, replacement, preserveLayout, safet
     // still detected and shown in the selection/audit UI before export.
     parts.push('');
   }
-  parts.push(redactText(doc.text, selectedEmails, replacement, preserveLayout, safetyNet));
+  const redactedBody = redactText(doc.text, selectedEmails, replacement, preserveLayout, safetyNet);
+  parts.push(stripLeadingRecipientListBlock(redactedBody, replacement));
   return parts.join('\n');
 }
 
