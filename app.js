@@ -592,6 +592,42 @@ async function extractDocxText(arrayBuffer) {
   return parts.filter(Boolean).join('\n');
 }
 
+
+function isLikelyBinaryNoise(value) {
+  const text = String(value || '');
+  if (!text) return false;
+  const sample = text.slice(0, 6000);
+  if (/(Root Entry|__substg|__recip_version|__properties_version|__nameid_version)/i.test(sample)) return true;
+  const controls = (sample.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
+  if (controls > Math.max(12, sample.length * 0.015)) return true;
+  const readable = (sample.match(/[A-Za-z0-9 .,;:'"!?@()\[\]\-_/\r\n]/g) || []).length;
+  return sample.length > 80 && readable / sample.length < 0.72;
+}
+
+function cleanMsgTextField(value) {
+  const cleaned = cleanExtractedString(value);
+  if (!cleaned || isLikelyBinaryNoise(cleaned)) return '';
+  return cleaned;
+}
+
+function extractFallbackEmailsFromMsgBytes(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const parts = [];
+  for (const item of extractUtf16LeStrings(bytes)) parts.push(item);
+  for (const item of extractAsciiStrings(bytes)) parts.push(item);
+  const seen = new Set();
+  const emails = [];
+  for (const part of parts) {
+    for (const email of extractEmailMatches(part)) {
+      if (!seen.has(email)) {
+        seen.add(email);
+        emails.push(email);
+      }
+    }
+  }
+  return emails;
+}
+
 function headersFromMsgData(fileData) {
   if (fileData.headers) return parseHeaders(fileData.headers);
 
@@ -629,13 +665,32 @@ function extractMsgData(arrayBuffer) {
 
   const headers = headersFromMsgData(fileData);
   const recipients = (fileData.recipients || []).map(formatMsgAddress).filter(Boolean).join('\n');
-  const body = cleanExtractedString(fileData.body || (fileData.bodyHTML ? htmlToText(fileData.bodyHTML) : ''));
+  const plainBody = cleanMsgTextField(fileData.body);
+  const htmlBody = cleanMsgTextField(fileData.bodyHTML ? htmlToText(fileData.bodyHTML) : '');
+  const body = plainBody || htmlBody;
   const attachments = (fileData.attachments || [])
     .map(item => item.fileName || item.fileNameShort)
     .filter(Boolean)
     .map(name => `Attachment: ${name}`)
     .join('\n');
-  const text = [cleanExtractedString(fileData.subject), recipients, body, attachments].filter(Boolean).join('\n\n');
+
+  let fallbackEmails = '';
+  if (!recipients && !body) {
+    const emails = extractFallbackEmailsFromMsgBytes(arrayBuffer);
+    if (emails.length) fallbackEmails = `Email addresses found in MSG file:\n${emails.join('\n')}`;
+  }
+
+  const text = [cleanMsgTextField(fileData.subject), recipients, body, attachments, fallbackEmails]
+    .filter(Boolean)
+    .join('\n\n');
+
+  if (!text) {
+    throw new Error('No readable message text could be extracted from this .msg file. The file may be encrypted, corrupted, or an unsupported Outlook variant.');
+  }
+
+  if (isLikelyBinaryNoise(text)) {
+    throw new Error('The MSG parser returned binary storage data instead of readable email text, so this file was skipped rather than exported as gibberish.');
+  }
 
   return { headers, text };
 }
