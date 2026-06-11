@@ -59,6 +59,12 @@ main {
 .summary, .status { margin-top: 12px; }
 .status.error { color: var(--danger); }
 .status.success { color: #116329; }
+.status.warning { color: #805000; }
+.error-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: var(--danger);
+}
 
 .grid.two {
   display: grid;

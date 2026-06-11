@@ -1,9 +1,29 @@
 const EMAIL_REGEX = /(?:mailto:)?([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi;
 const OBFUSCATED_EMAIL_REGEX = /\b([A-Z0-9._%+-]+)\s*(?:\[at\]|\(at\)|\sat\s)\s*([A-Z0-9.-]+)\s*(?:\[dot\]|\(dot\)|\sdot\s)\s*([A-Z]{2,})\b/gi;
+const MAX_METADATA_FIELD_CHARS = 1800;
+const SUPPORTED_FILE_TYPES = {
+  eml: 'email message',
+  msg: 'Outlook message',
+  txt: 'plain text',
+  html: 'HTML document',
+  htm: 'HTML document',
+  csv: 'CSV text',
+  md: 'Markdown text',
+  log: 'log text',
+  docx: 'Word document',
+  doc: 'Legacy Word document',
+};
+const UNSUPPORTED_FILE_MESSAGES = {
+  pdf: 'PDF parsing is not supported in this browser version. Use the desktop version or export the PDF text first.',
+  xls: 'Spreadsheets are not supported in this browser version. Save as .csv or use the desktop version.',
+  xlsx: 'Spreadsheets are not supported in this browser version. Save as .csv or use the desktop version.',
+};
 
 const state = {
   documents: [],
   emailMap: new Map(),
+  loadErrors: [],
+  ignoredFiles: [],
 };
 
 const els = {
@@ -33,6 +53,83 @@ function normaliseEmail(email) {
   return email.replace(/^mailto:/i, '').trim().replace(/[>),.;:]+$/g, '').toLowerCase();
 }
 
+function cleanExtractedString(value) {
+  return String(value || '')
+    .replace(/\u0000/g, '')
+    .replace(/[\x01-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .trim();
+}
+
+
+function isIgnorableFileName(name) {
+  const baseName = String(name || '').split(/[\\/]/).pop();
+  const lower = baseName.toLowerCase();
+
+  return (
+    !baseName ||
+    baseName.startsWith('~$') ||
+    baseName.startsWith('._') ||
+    lower === '.ds_store' ||
+    lower === 'thumbs.db' ||
+    lower.endsWith('.tmp') ||
+    lower.endsWith('.db') ||
+    lower.endsWith('.7z') ||
+    lower.endsWith('.zip')
+  );
+}
+
+function waitForUi() {
+  return new Promise(resolve => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+function getFileExtension(name) {
+  const match = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match ? match[1] : '';
+}
+
+function getSupportedFileType(name) {
+  const extension = getFileExtension(name);
+  if (SUPPORTED_FILE_TYPES[extension]) return extension;
+  return '';
+}
+
+function assertSupportedFile(name) {
+  const extension = getFileExtension(name);
+  const supportedType = getSupportedFileType(name);
+  if (supportedType) return supportedType;
+
+  if (UNSUPPORTED_FILE_MESSAGES[extension]) {
+    throw new Error(UNSUPPORTED_FILE_MESSAGES[extension]);
+  }
+
+  throw new Error('Unsupported file type. Please upload .eml, .msg, .docx, .doc, .txt, .html, .htm, .csv, .log, or .md files.');
+}
+
+function isBinarySupportedType(fileType) {
+  return fileType === 'msg' || fileType === 'docx' || fileType === 'doc';
+}
+
+function assertLooksLikeText(raw, name) {
+  const text = String(raw || '');
+  if (!text) return;
+
+  if (text.includes('\u0000')) {
+    throw new Error(`${name} looks like a binary file, so it was skipped.`);
+  }
+
+  const sample = text.slice(0, 4000);
+  const controlChars = (sample.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g) || []).length;
+  if (controlChars > Math.max(8, sample.length * 0.02)) {
+    throw new Error(`${name} contains binary/control data, so it was skipped.`);
+  }
+}
+
 function cleanEmailText(text) {
   return text
     .replace(/=\r?\n/g, '')
@@ -44,27 +141,198 @@ function cleanEmailText(text) {
     .replace(/\u00a0/g, ' ');
 }
 
+function normaliseCharset(charset) {
+  const value = String(charset || 'utf-8').trim().toLowerCase().replace(/^"|"$/g, '');
+  if (['latin1', 'latin-1', 'iso8859-1', 'windows-1252'].includes(value)) return 'iso-8859-1';
+  return value || 'utf-8';
+}
+
+function decodeBytes(bytes, charset = 'utf-8') {
+  const preferred = normaliseCharset(charset);
+  const fallbacks = [preferred, 'utf-8', 'iso-8859-1'];
+
+  for (const name of [...new Set(fallbacks)]) {
+    try {
+      return new TextDecoder(name).decode(bytes);
+    } catch (err) {
+      // Try the next browser-supported charset.
+    }
+  }
+
+  return Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+}
+
+function decodeQuotedPrintable(value, charset = 'utf-8') {
+  const text = String(value || '').replace(/=\r?\n/g, '');
+  const bytes = [];
+
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '=' && /^[0-9A-F]{2}$/i.test(text.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(text.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      const code = text.charCodeAt(i);
+      if (code <= 0xff) {
+        bytes.push(code);
+      } else {
+        for (const byte of new TextEncoder().encode(text[i])) bytes.push(byte);
+      }
+    }
+  }
+
+  return decodeBytes(new Uint8Array(bytes), charset);
+}
+
+function decodeBase64(value, charset = 'utf-8') {
+  const compact = String(value || '').replace(/\s+/g, '');
+  if (!compact) return '';
+
+  try {
+    const binary = atob(compact);
+    const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+    return decodeBytes(bytes, charset);
+  } catch (err) {
+    throw new Error('Invalid base64 content in email body.');
+  }
+}
+
+function decodeMimeWords(value) {
+  return String(value || '').replace(/=\?([^?]+)\?([QB])\?([^?]*)\?=/gi, (full, charset, encoding, encoded) => {
+    try {
+      if (encoding.toUpperCase() === 'B') return decodeBase64(encoded, charset);
+      return decodeQuotedPrintable(encoded.replace(/_/g, ' '), charset);
+    } catch (err) {
+      return full;
+    }
+  });
+}
+
 function htmlToText(html) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
   doc.querySelectorAll('script, style').forEach(n => n.remove());
-  return doc.body ? doc.body.innerText : html;
+  const hrefEmails = Array.from(doc.querySelectorAll('[href]'))
+    .map(node => node.getAttribute('href') || '')
+    .filter(href => href.toLowerCase().startsWith('mailto:') || href.includes('@'));
+  return [doc.body ? doc.body.innerText : html, ...hrefEmails].filter(Boolean).join('\n');
+}
+
+function splitHeaderBody(raw) {
+  const split = String(raw || '').search(/\r?\n\r?\n/);
+  if (split < 0) return { headerText: String(raw || ''), body: '' };
+  const separator = String(raw || '').slice(split).match(/^\r?\n\r?\n/)[0];
+  return {
+    headerText: String(raw || '').slice(0, split),
+    body: String(raw || '').slice(split + separator.length),
+  };
 }
 
 function parseHeaders(raw) {
-  const headerEnd = raw.search(/\r?\n\r?\n/);
-  const headerText = headerEnd >= 0 ? raw.slice(0, headerEnd) : '';
+  const { headerText } = splitHeaderBody(raw);
   const unfolded = headerText.replace(/\r?\n[ \t]+/g, ' ');
   const headers = {};
   for (const line of unfolded.split(/\r?\n/)) {
     const idx = line.indexOf(':');
     if (idx === -1) continue;
     const key = line.slice(0, idx).trim().toLowerCase();
-    const value = line.slice(idx + 1).trim();
+    const value = decodeMimeWords(line.slice(idx + 1).trim());
     if (!headers[key]) headers[key] = [];
     headers[key].push(value);
   }
   return headers;
+}
+
+function getHeader(headers, key) {
+  return (headers[key.toLowerCase()] || []).join(', ');
+}
+
+function firstNonEmptyHeader(headers, keys) {
+  for (const key of keys) {
+    const value = (headers[key.toLowerCase()] || []).find(item => String(item || '').trim());
+    if (value) return value;
+  }
+  return '';
+}
+
+function parseHeaderParams(value) {
+  const pieces = String(value || '').match(/(?:[^;"']+|"[^"]*"|'[^']*')+/g) || [];
+  const type = (pieces.shift() || '').trim().toLowerCase();
+  const params = {};
+
+  for (const piece of pieces) {
+    const idx = piece.indexOf('=');
+    if (idx < 0) continue;
+    const key = piece.slice(0, idx).trim().toLowerCase();
+    const paramValue = piece.slice(idx + 1).trim().replace(/^"|"$/g, '');
+    params[key] = paramValue;
+  }
+
+  return { type, params };
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function splitMultipartParts(body, boundary) {
+  if (!boundary) return [];
+
+  const parts = [];
+  const marker = new RegExp(`(?:^|\\r?\\n)--${escapeRegex(boundary)}(--)?[^\\r\\n]*(?:\\r?\\n|$)`, 'g');
+  let partStart = null;
+  let match;
+
+  while ((match = marker.exec(body)) !== null) {
+    if (partStart !== null) {
+      parts.push(body.slice(partStart, match.index));
+    }
+
+    if (match[1] === '--') {
+      partStart = null;
+      break;
+    }
+
+    partStart = marker.lastIndex;
+  }
+
+  return parts.filter(part => part.trim());
+}
+
+function decodeMimeBody(body, headers) {
+  const contentType = parseHeaderParams(getHeader(headers, 'content-type'));
+  const transferEncoding = getHeader(headers, 'content-transfer-encoding').toLowerCase();
+  const charset = contentType.params.charset || 'utf-8';
+
+  if (transferEncoding.includes('quoted-printable')) return decodeQuotedPrintable(body, charset);
+  if (transferEncoding.includes('base64')) return decodeBase64(body, charset);
+  return cleanEmailText(body);
+}
+
+function collectTextParts(raw, depth = 0) {
+  if (depth > 12) return { textPlain: [], textHtml: [] };
+
+  const headers = parseHeaders(raw);
+  const contentType = parseHeaderParams(getHeader(headers, 'content-type'));
+  const { body } = splitHeaderBody(raw);
+  const textPlain = [];
+  const textHtml = [];
+
+  if (contentType.type.startsWith('multipart/')) {
+    for (const part of splitMultipartParts(body, contentType.params.boundary)) {
+      const child = collectTextParts(part, depth + 1);
+      textPlain.push(...child.textPlain);
+      textHtml.push(...child.textHtml);
+    }
+    return { textPlain, textHtml };
+  }
+
+  if (contentType.type === 'text/plain') {
+    textPlain.push(cleanEmailText(decodeMimeBody(body, headers)));
+  } else if (contentType.type === 'text/html') {
+    textHtml.push(htmlToText(cleanEmailText(decodeMimeBody(body, headers))));
+  }
+
+  return { textPlain, textHtml };
 }
 
 function extractEmailMatches(text) {
@@ -86,28 +354,305 @@ function extractEmailMatches(text) {
 }
 
 function findMultipartBody(raw) {
-  const textPlain = [];
-  const textHtml = [];
-  const parts = raw.split(/\r?\n--[^\r\n]+/g);
-  for (const part of parts) {
-    const lower = part.slice(0, 800).toLowerCase();
-    const split = part.search(/\r?\n\r?\n/);
-    if (split < 0) continue;
-    const body = cleanEmailText(part.slice(split));
-    if (lower.includes('content-type: text/plain')) textPlain.push(body);
-    if (lower.includes('content-type: text/html')) textHtml.push(htmlToText(body));
-  }
+  const rootHeaders = parseHeaders(raw);
+  const { textPlain, textHtml } = collectTextParts(raw);
+
   if (textPlain.length) return textPlain.join('\n\n');
   if (textHtml.length) return textHtml.join('\n\n');
-  const split = raw.search(/\r?\n\r?\n/);
-  return split >= 0 ? raw.slice(split) : raw;
+
+  const { body } = splitHeaderBody(raw);
+  return body ? decodeMimeBody(body, rootHeaders) : raw;
 }
 
-function extractTextFromFile(name, raw) {
-  const lower = name.toLowerCase();
-  const cleanedRaw = cleanEmailText(raw);
-  if (lower.endsWith('.html') || lower.endsWith('.htm')) return htmlToText(cleanedRaw);
-  if (lower.endsWith('.eml')) return findMultipartBody(cleanedRaw);
+function xmlToText(xml) {
+  return String(xml || '')
+    .replace(/<w:tab\b[^>]*\/>/g, '\t')
+    .replace(/<w:br\b[^>]*\/>/g, '\n')
+    .replace(/<\/w:p>/g, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+
+function readUInt32LE(view, offset) {
+  return view.getUint32(offset, true);
+}
+
+function readInt32LE(view, offset) {
+  return view.getInt32(offset, true);
+}
+
+function isOleCompoundFile(bytes) {
+  const signature = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+  return signature.every((value, index) => bytes[index] === value);
+}
+
+function decodeDirectoryName(bytes) {
+  let name = '';
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    const code = bytes[i] | (bytes[i + 1] << 8);
+    if (!code) break;
+    name += String.fromCharCode(code);
+  }
+  return name;
+}
+
+function sectorOffset(sector, sectorSize) {
+  return 512 + (sector * sectorSize);
+}
+
+function readSectorChain(bytes, view, fat, startSector, sectorSize, maxBytes = Infinity) {
+  if (startSector < 0) return new Uint8Array();
+  const chunks = [];
+  const seen = new Set();
+  let sector = startSector;
+  let total = 0;
+
+  while (sector >= 0 && sector < fat.length && !seen.has(sector)) {
+    seen.add(sector);
+    const offset = sectorOffset(sector, sectorSize);
+    if (offset < 0 || offset >= bytes.length) break;
+    const remaining = Math.max(0, Math.min(sectorSize, bytes.length - offset, maxBytes - total));
+    if (!remaining) break;
+    chunks.push(bytes.slice(offset, offset + remaining));
+    total += remaining;
+    if (total >= maxBytes) break;
+    const next = fat[sector];
+    if (next === -2 || next === -1 || next === -3 || next === -4) break;
+    sector = next;
+  }
+
+  const out = new Uint8Array(total);
+  let cursor = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, cursor);
+    cursor += chunk.length;
+  }
+  return out;
+}
+
+function parseOleDirectoryStreams(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  if (bytes.length < 512 || !isOleCompoundFile(bytes)) {
+    throw new Error('Legacy .doc file is not a valid Word binary document. Save it as .docx, .txt, or .html and try again.');
+  }
+
+  const view = new DataView(arrayBuffer);
+  const sectorShift = view.getUint16(0x1e, true);
+  const sectorSize = 1 << sectorShift;
+  const fatSectorCount = readUInt32LE(view, 0x2c);
+  const directoryStartSector = readInt32LE(view, 0x30);
+  const miniCutoff = readUInt32LE(view, 0x38) || 4096;
+  const difat = [];
+
+  for (let offset = 0x4c; offset < 0x4c + 109 * 4; offset += 4) {
+    const sector = readInt32LE(view, offset);
+    if (sector >= 0) difat.push(sector);
+  }
+
+  const fat = [];
+  for (const fatSector of difat.slice(0, fatSectorCount || difat.length)) {
+    const offset = sectorOffset(fatSector, sectorSize);
+    if (offset < 0 || offset + 4 > bytes.length) continue;
+    for (let pos = offset; pos + 4 <= Math.min(offset + sectorSize, bytes.length); pos += 4) {
+      fat.push(readInt32LE(view, pos));
+    }
+  }
+
+  const directoryBytes = readSectorChain(bytes, view, fat, directoryStartSector, sectorSize);
+  const entries = [];
+  for (let offset = 0; offset + 128 <= directoryBytes.length; offset += 128) {
+    const entry = directoryBytes.slice(offset, offset + 128);
+    const nameLength = Math.max(0, (entry[0x40] | (entry[0x41] << 8)) - 2);
+    const name = decodeDirectoryName(entry.slice(0, Math.min(nameLength, 64)));
+    const type = entry[0x42];
+    const startSector = readInt32LE(new DataView(entry.buffer, entry.byteOffset, entry.byteLength), 0x74);
+    const size = readUInt32LE(new DataView(entry.buffer, entry.byteOffset, entry.byteLength), 0x78);
+    if (name && (type === 2 || type === 5)) entries.push({ name, type, startSector, size });
+  }
+
+  const streams = [];
+  for (const entry of entries) {
+    if (entry.type !== 2) continue;
+    if (entry.size > 0 && entry.size < miniCutoff) continue;
+    const data = readSectorChain(bytes, view, fat, entry.startSector, sectorSize, entry.size || Infinity);
+    if (data.length) streams.push({ name: entry.name, data });
+  }
+  return streams;
+}
+
+function extractAsciiStrings(bytes) {
+  const strings = [];
+  let current = '';
+  const flush = () => {
+    const cleaned = current.replace(/[ \t]{2,}/g, ' ').trim();
+    if (cleaned.length >= 4) strings.push(cleaned);
+    current = '';
+  };
+
+  for (const byte of bytes) {
+    if (byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte <= 126) || byte >= 160) {
+      current += String.fromCharCode(byte);
+      if (current.length >= 2000) flush();
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return strings;
+}
+
+function extractUtf16LeStrings(bytes) {
+  const strings = [];
+  let current = '';
+  const flush = () => {
+    const cleaned = current.replace(/[ \t]{2,}/g, ' ').trim();
+    if (cleaned.length >= 4) strings.push(cleaned);
+    current = '';
+  };
+
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    const code = bytes[i] | (bytes[i + 1] << 8);
+    if (code === 9 || code === 10 || code === 13 || (code >= 32 && code <= 0xd7ff) || (code >= 0xe000 && code <= 0xfffd)) {
+      current += String.fromCharCode(code);
+      if (current.length >= 2000) flush();
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return strings;
+}
+
+function extractLegacyDocText(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  let streams = [];
+  try {
+    streams = parseOleDirectoryStreams(arrayBuffer);
+  } catch (error) {
+    throw error;
+  }
+
+  const preferredNames = ['WordDocument', '1Table', '0Table', 'Data', '\u0005SummaryInformation', '\u0005DocumentSummaryInformation'];
+  const selectedStreams = streams.filter(stream => preferredNames.includes(stream.name));
+  const sourceStreams = selectedStreams.length ? selectedStreams : streams;
+  const parts = [];
+
+  for (const stream of sourceStreams) {
+    for (const item of extractUtf16LeStrings(stream.data)) parts.push(item);
+    for (const item of extractAsciiStrings(stream.data)) parts.push(item);
+  }
+
+  // Fallback scan across the whole file. This improves detection where a document stores
+  // useful strings in a small stream that the static parser cannot safely reconstruct.
+  for (const item of extractUtf16LeStrings(bytes)) parts.push(item);
+  for (const item of extractAsciiStrings(bytes)) parts.push(item);
+
+  const unique = [];
+  const seen = new Set();
+  for (const part of parts.map(cleanExtractedString).filter(Boolean)) {
+    const normalised = part.slice(0, 500);
+    if (!seen.has(normalised)) {
+      seen.add(normalised);
+      unique.push(normalised);
+    }
+  }
+
+  if (!unique.length) {
+    throw new Error('No readable text could be extracted from this .doc file. Save it as .docx, .txt, or .html and try again.');
+  }
+
+  return unique.join('\n');
+}
+
+async function extractDocxText(arrayBuffer) {
+  const zip = await JSZip.loadAsync(arrayBuffer);
+  const documentXml = zip.file('word/document.xml');
+  if (!documentXml) throw new Error('Word document is missing word/document.xml.');
+
+  const parts = [xmlToText(await documentXml.async('string'))];
+  const rels = zip.file('word/_rels/document.xml.rels');
+
+  if (rels) {
+    const relXml = await rels.async('string');
+    const urls = Array.from(relXml.matchAll(/Target="([^"]+)"/g))
+      .map(match => match[1])
+      .filter(target => target.includes('@') || target.toLowerCase().startsWith('mailto:'));
+    parts.push(...urls);
+  }
+
+  return parts.filter(Boolean).join('\n');
+}
+
+function headersFromMsgData(fileData) {
+  if (fileData.headers) return parseHeaders(fileData.headers);
+
+  const headers = {};
+  const add = (key, value) => {
+    if (!value) return;
+    headers[key] = [cleanExtractedString(value)];
+  };
+
+  add('subject', fileData.subject);
+  add('from', [fileData.senderName, fileData.senderEmail].filter(Boolean).join(' <') + (fileData.senderEmail ? '>' : ''));
+  if (fileData.recipients && fileData.recipients.length) {
+    headers.to = [fileData.recipients.map(formatMsgAddress).filter(Boolean).join(', ')];
+  }
+
+  return headers;
+}
+
+function formatMsgAddress(address) {
+  if (!address) return '';
+  const name = cleanExtractedString(address.name);
+  const email = cleanExtractedString(address.email);
+  if (name && email) return `${name} <${email}>`;
+  return email || name || '';
+}
+
+function extractMsgData(arrayBuffer) {
+  if (!window.MSGReader) {
+    throw new Error('Outlook .msg support did not load. Refresh the page and try again.');
+  }
+
+  const reader = new window.MSGReader(arrayBuffer);
+  const fileData = reader.getFileData();
+  if (fileData.error) throw new Error(fileData.error);
+
+  const headers = headersFromMsgData(fileData);
+  const recipients = (fileData.recipients || []).map(formatMsgAddress).filter(Boolean).join('\n');
+  const body = cleanExtractedString(fileData.body || (fileData.bodyHTML ? htmlToText(fileData.bodyHTML) : ''));
+  const attachments = (fileData.attachments || [])
+    .map(item => item.fileName || item.fileNameShort)
+    .filter(Boolean)
+    .map(name => `Attachment: ${name}`)
+    .join('\n');
+  const text = [cleanExtractedString(fileData.subject), recipients, body, attachments].filter(Boolean).join('\n\n');
+
+  return { headers, text };
+}
+
+async function extractTextFromFile(name, raw, arrayBuffer = null) {
+  const fileType = assertSupportedFile(name);
+  if (isBinarySupportedType(fileType)) {
+    if (!arrayBuffer) throw new Error(`${name} needs binary reading but no data was provided.`);
+    if (fileType === 'docx') return extractDocxText(arrayBuffer);
+    if (fileType === 'doc') return extractLegacyDocText(arrayBuffer);
+    if (fileType === 'msg') return extractMsgData(arrayBuffer).text;
+  }
+
+  assertLooksLikeText(raw, name);
+  const cleanedRaw = cleanEmailText(decodeMimeWords(raw));
+  if (fileType === 'html' || fileType === 'htm') return htmlToText(cleanedRaw);
+  if (fileType === 'eml') return findMultipartBody(raw);
   return cleanedRaw;
 }
 
@@ -134,42 +679,101 @@ async function readFileAsText(file) {
   return await file.text();
 }
 
+async function readFileAsArrayBuffer(file) {
+  return await file.arrayBuffer();
+}
+
 async function handleFiles(files) {
   state.documents = [];
   state.emailMap = new Map();
+  state.loadErrors = [];
+  state.ignoredFiles = [];
   setStatus('Reading files...');
 
-  for (const file of files) {
-    const raw = await readFileAsText(file);
-    const headers = parseHeaders(raw);
-    const text = extractTextFromFile(file.name, raw);
-
-    const headerEmails = { to: [], cc: [], bcc: [], from: [], 'reply-to': [] };
-    for (const header of Object.keys(headerEmails)) {
-      headerEmails[header] = extractEmailMatches((headers[header] || []).join(', '));
+  const fileList = Array.from(files || []);
+  for (let fileIndex = 0; fileIndex < fileList.length; fileIndex += 1) {
+    const file = fileList[fileIndex];
+    if (isIgnorableFileName(file.name)) {
+      state.ignoredFiles.push(file.name);
+      continue;
     }
 
-    const bodyEmails = extractEmailMatches(text);
-    const doc = { name: file.name, raw, headers, headerEmails, text, bodyEmails };
-    state.documents.push(doc);
-
-    for (const [header, emails] of Object.entries(headerEmails)) {
-      for (const email of emails) addEmailToMap(email, file.name, [header.toUpperCase()]);
+    if (fileIndex > 0 && fileIndex % 10 === 0) {
+      setStatus(`Reading file ${fileIndex + 1} of ${fileList.length}...`);
+      await waitForUi();
     }
-    for (const email of bodyEmails) addEmailToMap(email, file.name, ['Body']);
+    try {
+      const fileType = assertSupportedFile(file.name);
+      let raw = '';
+      let arrayBuffer = null;
+      let headers = {};
+      let text = '';
+
+      if (isBinarySupportedType(fileType)) {
+        arrayBuffer = await readFileAsArrayBuffer(file);
+        if (fileType === 'msg') {
+          const msgData = extractMsgData(arrayBuffer);
+          headers = msgData.headers;
+          text = msgData.text;
+        } else {
+          text = await extractTextFromFile(file.name, raw, arrayBuffer);
+        }
+      } else {
+        raw = await readFileAsText(file);
+        assertLooksLikeText(raw, file.name);
+        headers = fileType === 'eml' ? parseHeaders(raw) : {};
+        text = await extractTextFromFile(file.name, raw);
+      }
+
+      const headerEmails = { to: [], cc: [], bcc: [], from: [], 'reply-to': [] };
+      for (const header of Object.keys(headerEmails)) {
+        headerEmails[header] = extractEmailMatches((headers[header] || []).join(', '));
+      }
+
+      const bodyEmails = extractEmailMatches(text);
+      const doc = { name: file.name, raw, headers, headerEmails, text, bodyEmails };
+      state.documents.push(doc);
+
+      for (const [header, emails] of Object.entries(headerEmails)) {
+        for (const email of emails) addEmailToMap(email, file.name, [header.toUpperCase()]);
+      }
+      for (const email of bodyEmails) addEmailToMap(email, file.name, ['Body']);
+    } catch (error) {
+      console.error(error);
+      state.loadErrors.push({ file: file.name, message: error.message || 'Unknown parsing error.' });
+    }
   }
 
   renderSummary();
   renderEmailTable();
-  setStatus(`Loaded ${state.documents.length} file(s). Found ${state.emailMap.size} unique email address(es).`, 'success');
+  const ignoredText = state.ignoredFiles.length ? ` Ignored ${state.ignoredFiles.length} temporary/system file(s).` : '';
+  if (state.loadErrors.length && !state.documents.length) {
+    setStatus(`No files could be loaded. ${state.loadErrors[0].file}: ${state.loadErrors[0].message}${ignoredText}`, 'error');
+  } else if (state.loadErrors.length) {
+    setStatus(`Loaded ${state.documents.length} file(s), skipped ${state.loadErrors.length}. Found ${state.emailMap.size} unique email address(es).${ignoredText}`, 'warning');
+  } else {
+    setStatus(`Loaded ${state.documents.length} file(s). Found ${state.emailMap.size} unique email address(es).${ignoredText}`, 'success');
+  }
 }
 
 function renderSummary() {
+  const errorList = state.loadErrors.length
+    ? `<ul class="error-list">${state.loadErrors.map(error => `<li><strong>${escapeHtml(error.file)}</strong>: ${escapeHtml(error.message)}</li>`).join('')}</ul>`
+    : '';
+  const ignoredText = state.ignoredFiles.length
+    ? ` <strong>${state.ignoredFiles.length}</strong> temporary/system file(s) ignored.`
+    : '';
+
   if (!state.documents.length) {
-    els.fileSummary.textContent = '';
+    els.fileSummary.innerHTML = state.loadErrors.length
+      ? `<strong>${state.loadErrors.length}</strong> file(s) could not be loaded.${ignoredText}${errorList}`
+      : ignoredText;
     return;
   }
-  els.fileSummary.innerHTML = `<strong>${state.documents.length}</strong> file(s) loaded. <strong>${state.emailMap.size}</strong> unique email address(es) found.`;
+  const errorText = state.loadErrors.length
+    ? ` <strong>${state.loadErrors.length}</strong> file(s) skipped.`
+    : '';
+  els.fileSummary.innerHTML = `<strong>${state.documents.length}</strong> file(s) loaded. <strong>${state.emailMap.size}</strong> unique email address(es) found.${errorText}${ignoredText}${errorList}`;
 }
 
 function renderEmailTable() {
@@ -253,23 +857,35 @@ function redactText(text, selectedEmails, replacement, preserveLayout, safetyNet
 function buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata) {
   const parts = [];
   if (includeMetadata) {
-    const subject = (doc.headers.subject || [''])[0];
-    const date = (doc.headers.date || [''])[0];
-    const from = (doc.headers.from || ['']).join(', ');
-    const to = (doc.headers.to || ['']).join(', ');
-    const cc = (doc.headers.cc || ['']).join(', ');
-    const bcc = (doc.headers.bcc || ['']).join(', ');
+    const subject = firstNonEmptyHeader(doc.headers, ['subject', 'thread-topic']);
+    const date = getHeader(doc.headers, 'date');
+    const from = getHeader(doc.headers, 'from');
+    const to = getHeader(doc.headers, 'to');
+    const cc = getHeader(doc.headers, 'cc');
+    const bcc = getHeader(doc.headers, 'bcc');
     parts.push(doc.name);
     if (subject) parts.push(`Subject: ${subject}`);
     if (date) parts.push(`Date: ${date}`);
-    if (from) parts.push(`From: ${redactText(from, selectedEmails, replacement, preserveLayout, safetyNet)}`);
-    if (to) parts.push(`To: ${redactText(to, selectedEmails, replacement, preserveLayout, safetyNet)}`);
-    if (cc) parts.push(`Cc: ${redactText(cc, selectedEmails, replacement, preserveLayout, safetyNet)}`);
-    if (bcc) parts.push(`Bcc: ${redactText(bcc, selectedEmails, replacement, preserveLayout, safetyNet)}`);
+    if (from) parts.push(formatMetadataHeader('From', from, selectedEmails, replacement, preserveLayout, safetyNet));
+    if (to) parts.push(formatMetadataHeader('To', to, selectedEmails, replacement, preserveLayout, safetyNet));
+    if (cc) parts.push(formatMetadataHeader('Cc', cc, selectedEmails, replacement, preserveLayout, safetyNet));
+    if (bcc) parts.push(formatMetadataHeader('Bcc', bcc, selectedEmails, replacement, preserveLayout, safetyNet));
     parts.push('');
   }
   parts.push(redactText(doc.text, selectedEmails, replacement, preserveLayout, safetyNet));
   return parts.join('\n');
+}
+
+function formatMetadataHeader(label, value, selectedEmails, replacement, preserveLayout, safetyNet) {
+  const redacted = redactText(value, selectedEmails, replacement, preserveLayout, safetyNet);
+  if (redacted.length <= MAX_METADATA_FIELD_CHARS) return `${label}: ${redacted}`;
+
+  const addressCount = extractEmailMatches(value).length;
+  const preview = redacted.slice(0, MAX_METADATA_FIELD_CHARS).replace(/\s+$/g, '');
+  const suffix = addressCount
+    ? ` ... [${addressCount} address(es) in ${label}; metadata shortened for stable PDF export]`
+    : ' ... [metadata shortened for stable PDF export]';
+  return `${label}: ${preview}${suffix}`;
 }
 
 async function createPdfBytes(title, text) {
@@ -294,13 +910,13 @@ async function createPdfBytes(title, text) {
   }
 
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine || ' ';
+    const line = makePdfSafeText(rawLine) || ' ';
     const chunks = [];
     for (let i = 0; i < line.length; i += maxChars) chunks.push(line.slice(i, i + maxChars));
     if (!chunks.length) chunks.push(' ');
     for (const chunk of chunks) {
       if (y < margin) newPage();
-      page.drawText(makePdfSafeText(chunk), { x: margin, y, size: fontSize, font });
+      page.drawText(chunk, { x: margin, y, size: fontSize, font });
       y -= lineHeight;
     }
   }
@@ -326,16 +942,24 @@ async function exportFiles() {
     if (exportMode === 'txtzip') {
       const zip = new JSZip();
       for (const doc of state.documents) {
-        const text = buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata);
-        zip.file(`${safeBaseName(doc.name)}_redacted.txt`, text);
+        try {
+          const text = buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata);
+          zip.file(`${safeBaseName(doc.name)}_redacted.txt`, text);
+        } catch (error) {
+          throw new Error(`${doc.name}: ${error.message}`);
+        }
       }
       downloadBlob(await zip.generateAsync({ type: 'blob' }), 'redacted_text_files.zip');
     } else if (exportMode === 'zip') {
       const zip = new JSZip();
       for (const doc of state.documents) {
-        const text = buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata);
-        const pdfBytes = await createPdfBytes(`${doc.name}`, text);
-        zip.file(`${safeBaseName(doc.name)}_redacted.pdf`, pdfBytes);
+        try {
+          const text = buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata);
+          const pdfBytes = await createPdfBytes(`${doc.name}`, text);
+          zip.file(`${safeBaseName(doc.name)}_redacted.pdf`, pdfBytes);
+        } catch (error) {
+          throw new Error(`${doc.name}: ${error.message}`);
+        }
       }
       zip.file('redaction_audit.csv', buildAuditCsv(selectedEmails));
       downloadBlob(await zip.generateAsync({ type: 'blob' }), 'redacted_pdfs.zip');
@@ -343,11 +967,15 @@ async function exportFiles() {
       const { PDFDocument } = PDFLib;
       const combined = await PDFDocument.create();
       for (const doc of state.documents) {
-        const text = buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata);
-        const pdfBytes = await createPdfBytes(`${doc.name}`, text);
-        const src = await PDFDocument.load(pdfBytes);
-        const pages = await combined.copyPages(src, src.getPageIndices());
-        pages.forEach(p => combined.addPage(p));
+        try {
+          const text = buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata);
+          const pdfBytes = await createPdfBytes(`${doc.name}`, text);
+          const src = await PDFDocument.load(pdfBytes);
+          const pages = await combined.copyPages(src, src.getPageIndices());
+          pages.forEach(p => combined.addPage(p));
+        } catch (error) {
+          throw new Error(`${doc.name}: ${error.message}`);
+        }
       }
       const combinedBytes = await combined.save();
       downloadBlob(new Blob([combinedBytes], { type: 'application/pdf' }), 'combined_redacted_documents.pdf');
@@ -355,7 +983,7 @@ async function exportFiles() {
     setStatus('Export generated successfully.', 'success');
   } catch (error) {
     console.error(error);
-    setStatus(`Export failed: ${error.message}`, 'error');
+    setStatus(`Export failed. ${error.message || 'Try TXT export or remove the problem file.'}`, 'error');
   }
 }
 
@@ -396,6 +1024,7 @@ els.exportBtn.addEventListener('click', exportFiles);
 els.clearBtn.addEventListener('click', () => {
   state.documents = [];
   state.emailMap = new Map();
+  state.loadErrors = [];
   els.fileInput.value = '';
   renderSummary();
   renderEmailTable();

@@ -18,8 +18,8 @@
   <main>
     <section class="card">
       <h2>1. Upload files</h2>
-      <p class="muted">Supported in this GitHub Pages version: .eml, .txt, .html, .htm. PDF upload is treated as plain extracted text only if the browser can read it as text; for reliable PDF extraction use the desktop version.</p>
-      <input id="fileInput" type="file" multiple accept=".eml,.txt,.html,.htm,.csv,.md" />
+      <p class="muted">Supported in this GitHub Pages version: .eml, .msg, .docx, .doc, .txt, .html, .htm, .csv, .log and .md. PDF and spreadsheet files need the desktop version or must be exported to a supported format first.</p>
+      <input id="fileInput" type="file" multiple accept=".eml,.msg,.docx,.doc,.txt,.html,.htm,.csv,.log,.md" />
       <div id="fileSummary" class="summary"></div>
     </section>
 
@@ -107,9 +107,15 @@
           'https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js',
           'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js'
         ]);
+        await loadScriptWithFallback('DataStream', [
+          'vendor/DataStream.js'
+        ]);
+        await loadScriptWithFallback('MSGReader', [
+          'vendor/msg.reader.js'
+        ]);
 
-        if (!window.JSZip || !window.PDFLib) {
-          throw new Error('Libraries loaded but did not expose JSZip/PDFLib globals.');
+        if (!window.JSZip || !window.PDFLib || !window.MSGReader) {
+          throw new Error('Libraries loaded but did not expose JSZip/PDFLib/MSGReader globals.');
         }
 
         const appScript = document.createElement('script');

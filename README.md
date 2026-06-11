@@ -5,13 +5,19 @@ This is a static browser-based email redaction tool. It can be hosted on GitHub 
 ## Supported files
 
 - `.eml`
+- `.msg`
+- `.docx`
+- `.doc`
 - `.txt`
 - `.html`
 - `.htm`
 - `.csv`
+- `.log`
 - `.md`
 
-For reliable PDF and Word extraction, use the Electron desktop version. Browser-only PDF extraction is intentionally not included in this static version because true PDF parsing/redaction is not reliable enough without a backend or desktop runtime.
+Outlook `.msg`, modern Word `.docx`, and legacy Word `.doc` files are parsed in-browser. Legacy `.doc` parsing uses best-effort text extraction from the Word binary file, so very old or damaged documents may need to be saved as `.docx`, `.txt`, or `.html` first. PDF and spreadsheet extraction are intentionally not included in this static browser version because reliable parsing/redaction for those formats needs a backend or desktop runtime. Save spreadsheets as `.csv` or use the Electron desktop version.
+
+Unsupported files such as `.pdf`, `.xlsx`, images and other binary formats are skipped with a clear error message instead of being treated as broken text.
 
 ## Features
 
@@ -19,6 +25,7 @@ For reliable PDF and Word extraction, use the Electron desktop version. Browser-
 - Detects standard email addresses.
 - Detects `mailto:` addresses.
 - Detects common obfuscated forms such as `name [at] domain [dot] org`.
+- Extracts readable text from Outlook `.msg` messages and Word `.docx` / `.doc` documents.
 - Select all, select none, select only To/Cc/Bcc, or select body emails.
 - Optional safety-net redaction at export time.
 - Export individual PDFs in a ZIP.
