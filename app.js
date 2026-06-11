@@ -680,7 +680,7 @@ function extractMsgData(arrayBuffer) {
     if (emails.length) fallbackEmails = `Email addresses found in MSG file:\n${emails.join('\n')}`;
   }
 
-  const text = [cleanMsgTextField(fileData.subject), recipients, body, attachments, fallbackEmails]
+  const text = [recipients, body, attachments, fallbackEmails]
     .filter(Boolean)
     .join('\n\n');
 
@@ -924,24 +924,67 @@ function isRedactedRecipientListLine(line, replacement) {
     || /^[^<>]{0,120}<\s*x{6,}\s*>[;,]?$/i.test(trimmed);
 }
 
-function stripLeadingRecipientListBlock(text, replacement) {
+function stripRecipientListBlocksNearTop(text, replacement) {
   const lines = String(text || '').split(/\r?\n/);
+  const output = [];
   let index = 0;
-  while (index < lines.length && !lines[index].trim()) index += 1;
+  let nonEmptyNormalLinesSeen = 0;
+  const maxTopNormalLines = 8;
+  const maxTopPhysicalLines = 250;
 
-  let scan = index;
-  let recipientLikeCount = 0;
-  while (scan < lines.length && isRedactedRecipientListLine(lines[scan], replacement)) {
-    if (lines[scan].trim()) recipientLikeCount += 1;
-    scan += 1;
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    // Only run this aggressive cleanup in the document header/top matter. Once
+    // a real body has started, repeated redacted values may be legitimate quoted
+    // content, so leave the rest untouched.
+    const stillInTopMatter = index < maxTopPhysicalLines && nonEmptyNormalLinesSeen <= maxTopNormalLines;
+    if (!stillInTopMatter) {
+      output.push(...lines.slice(index));
+      break;
+    }
+
+    if (trimmed && isRedactedRecipientListLine(line, replacement)) {
+      let scan = index;
+      let recipientLikeCount = 0;
+      let blankCount = 0;
+
+      while (scan < lines.length) {
+        const candidate = lines[scan];
+        const candidateTrimmed = candidate.trim();
+
+        if (!candidateTrimmed) {
+          blankCount += 1;
+          // A single blank inside a recipient list is tolerated, but multiple
+          // blanks usually indicate a paragraph boundary.
+          if (blankCount > 1) break;
+          scan += 1;
+          continue;
+        }
+
+        if (!isRedactedRecipientListLine(candidate, replacement)) break;
+        blankCount = 0;
+        recipientLikeCount += 1;
+        scan += 1;
+      }
+
+      // Remove only clear recipient-list blocks. This catches .msg exports where
+      // Outlook recipient streams appear after the file title/subject instead of
+      // in labelled To/Cc/Bcc headers.
+      if (recipientLikeCount >= 3) {
+        while (scan < lines.length && !lines[scan].trim()) scan += 1;
+        index = scan;
+        continue;
+      }
+    }
+
+    output.push(line);
+    if (trimmed && !isRedactedRecipientListLine(line, replacement)) nonEmptyNormalLinesSeen += 1;
+    index += 1;
   }
 
-  // Only remove a block when it clearly looks like exported recipient metadata,
-  // not when a normal message happens to start with one redacted address.
-  if (recipientLikeCount < 3) return text;
-
-  while (scan < lines.length && !lines[scan].trim()) scan += 1;
-  return lines.slice(scan).join('\n').replace(/^\n+/, '');
+  return output.join('\n').replace(/^\n+/, '');
 }
 
 function buildOutputText(doc, selectedEmails, replacement, preserveLayout, safetyNet, includeMetadata) {
@@ -961,7 +1004,7 @@ function buildOutputText(doc, selectedEmails, replacement, preserveLayout, safet
     parts.push('');
   }
   const redactedBody = redactText(doc.text, selectedEmails, replacement, preserveLayout, safetyNet);
-  parts.push(stripLeadingRecipientListBlock(redactedBody, replacement));
+  parts.push(stripRecipientListBlocksNearTop(redactedBody, replacement));
   return parts.join('\n');
 }
 
