@@ -915,16 +915,14 @@ function buildOutputText(doc, selectedEmails, replacement, preserveLayout, safet
     const subject = firstNonEmptyHeader(doc.headers, ['subject', 'thread-topic']);
     const date = getHeader(doc.headers, 'date');
     const from = getHeader(doc.headers, 'from');
-    const to = getHeader(doc.headers, 'to');
-    const cc = getHeader(doc.headers, 'cc');
-    const bcc = getHeader(doc.headers, 'bcc');
     parts.push(doc.name);
     if (subject) parts.push(`Subject: ${subject}`);
     if (date) parts.push(`Date: ${date}`);
     if (from) parts.push(formatMetadataHeader('From', from, selectedEmails, replacement, preserveLayout, safetyNet));
-    if (to) parts.push(formatRecipientMetadataHeader('To', to, selectedEmails, safetyNet));
-    if (cc) parts.push(formatRecipientMetadataHeader('Cc', cc, selectedEmails, safetyNet));
-    if (bcc) parts.push(formatRecipientMetadataHeader('Bcc', bcc, selectedEmails, safetyNet));
+    // Recipient headers are deliberately omitted from exported PDFs/text output.
+    // Large To/Cc/Bcc lists create pages of redacted or blank recipient metadata
+    // and are not useful in the redacted document copy. Recipient addresses are
+    // still detected and shown in the selection/audit UI before export.
     parts.push('');
   }
   parts.push(redactText(doc.text, selectedEmails, replacement, preserveLayout, safetyNet));

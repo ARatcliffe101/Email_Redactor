@@ -68,3 +68,8 @@ Then open:
 ```text
 http://localhost:8080
 ```
+
+
+## Export behaviour
+
+For email files, To/Cc/Bcc recipient header lines are omitted from exported TXT/PDF copies to avoid long recipient lists. Recipient email addresses are still detected for review and included in the redaction audit where applicable.
