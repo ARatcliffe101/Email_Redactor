@@ -17,7 +17,7 @@ This is a static browser-based email redaction tool. It can be hosted on GitHub 
 
 Outlook `.msg`, modern Word `.docx`, and legacy Word `.doc` files are parsed in-browser. Legacy `.doc` parsing uses best-effort text extraction from the Word binary file, so very old or damaged documents may need to be saved as `.docx`, `.txt`, or `.html` first. PDF and spreadsheet extraction are intentionally not included in this static browser version because reliable parsing/redaction for those formats needs a backend or desktop runtime. Save spreadsheets as `.csv` or use the Electron desktop version.
 
-Unsupported files such as `.pdf`, `.xlsx`, images and other binary formats are skipped with a clear error message instead of being treated as broken text.
+The file picker is intentionally not restricted with an `accept` filter, because some browsers and managed Windows environments hide Outlook `.msg` files incorrectly. The app still validates files after selection and skips unsupported files such as `.pdf`, `.xlsx`, images and other binary formats with a clear error message instead of treating them as broken text.
 
 ## Features
 
