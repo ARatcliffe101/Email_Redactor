@@ -664,7 +664,7 @@ function extractMsgData(arrayBuffer) {
   if (fileData.error) throw new Error(fileData.error);
 
   const headers = headersFromMsgData(fileData);
-  const recipients = (fileData.recipients || []).map(formatMsgAddress).filter(Boolean).join('\n');
+  const recipients = '';
   const plainBody = cleanMsgTextField(fileData.body);
   const htmlBody = cleanMsgTextField(fileData.bodyHTML ? htmlToText(fileData.bodyHTML) : '');
   const body = plainBody || htmlBody;
@@ -922,13 +922,59 @@ function buildOutputText(doc, selectedEmails, replacement, preserveLayout, safet
     if (subject) parts.push(`Subject: ${subject}`);
     if (date) parts.push(`Date: ${date}`);
     if (from) parts.push(formatMetadataHeader('From', from, selectedEmails, replacement, preserveLayout, safetyNet));
-    if (to) parts.push(formatMetadataHeader('To', to, selectedEmails, replacement, preserveLayout, safetyNet));
-    if (cc) parts.push(formatMetadataHeader('Cc', cc, selectedEmails, replacement, preserveLayout, safetyNet));
-    if (bcc) parts.push(formatMetadataHeader('Bcc', bcc, selectedEmails, replacement, preserveLayout, safetyNet));
+    if (to) parts.push(formatRecipientMetadataHeader('To', to, selectedEmails, safetyNet));
+    if (cc) parts.push(formatRecipientMetadataHeader('Cc', cc, selectedEmails, safetyNet));
+    if (bcc) parts.push(formatRecipientMetadataHeader('Bcc', bcc, selectedEmails, safetyNet));
     parts.push('');
   }
   parts.push(redactText(doc.text, selectedEmails, replacement, preserveLayout, safetyNet));
   return parts.join('\n');
+}
+
+function shouldRemoveEmail(email, selectedEmails, safetyNet) {
+  return safetyNet || selectedEmails.has(normaliseEmail(email));
+}
+
+function removeEmailsFromRecipientHeader(value, selectedEmails, safetyNet) {
+  let output = cleanEmailText(value || '');
+
+  output = output.replace(/([^,;\n<>]*?)\s*<([^<>\s@]+@[^<>\s@]+\.[^<>\s@]+)>/g, (full, displayName, email) => {
+    if (!shouldRemoveEmail(email, selectedEmails, safetyNet)) return full;
+    const cleanedName = cleanEmailText(displayName).replace(/[\s,;]+$/g, '').trim();
+    return cleanedName;
+  });
+
+  output = output.replace(/mailto:([^\s,;<>]+@[^\s,;<>]+\.[^\s,;<>]+)/gi, (full, email) => {
+    return shouldRemoveEmail(email, selectedEmails, safetyNet) ? '' : full;
+  });
+
+  output = output.replace(EMAIL_REGEX, (full, captured) => {
+    const email = captured || full;
+    return shouldRemoveEmail(email, selectedEmails, safetyNet) ? '' : full;
+  });
+
+  output = output
+    .replace(/<\s*>/g, '')
+    .replace(/\(\s*\)/g, '')
+    .replace(/\[\s*\]/g, '')
+    .replace(/\s*[,;]\s*[,;]+/g, ', ')
+    .replace(/^[\s,;]+|[\s,;]+$/g, '')
+    .replace(/\s{2,}/g, ' ');
+
+  return output;
+}
+
+function formatRecipientMetadataHeader(label, value, selectedEmails, safetyNet) {
+  const cleaned = removeEmailsFromRecipientHeader(value, selectedEmails, safetyNet);
+  if (!cleaned) return `${label}:`;
+  if (cleaned.length <= MAX_METADATA_FIELD_CHARS) return `${label}: ${cleaned}`;
+
+  const addressCount = extractEmailMatches(value).length;
+  const preview = cleaned.slice(0, MAX_METADATA_FIELD_CHARS).replace(/\s+$/g, '');
+  const suffix = addressCount
+    ? ` ... [${addressCount} address(es) removed from ${label}; metadata shortened for stable PDF export]`
+    : ' ... [metadata shortened for stable PDF export]';
+  return `${label}: ${preview}${suffix}`;
 }
 
 function formatMetadataHeader(label, value, selectedEmails, replacement, preserveLayout, safetyNet) {

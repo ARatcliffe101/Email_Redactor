@@ -28,6 +28,7 @@ The file picker is intentionally not restricted with an `accept` filter, because
 - Extracts readable text from Outlook `.msg` messages and Word `.docx` / `.doc` documents.
 - Select all, select none, select only To/Cc/Bcc, or select body emails.
 - Optional safety-net redaction at export time.
+- Removes selected email addresses from To, Cc and Bcc metadata fields instead of replacing them with redaction text.
 - Export individual PDFs in a ZIP.
 - Export one combined PDF.
 - Export individual redacted TXT files in a ZIP.
